@@ -6,9 +6,10 @@ import utilities
 import random
 
 
-FLAGS = tf.app.flags.FLAGS
-tf.app.flags.DEFINE_integer('batch_size', 1, 'Batch size. ')
-tf.app.flags.DEFINE_integer('total_epochs', 1000, 'Number of epochs for training')
+FLAGS = tf.flags.FLAGS
+tf.flags.DEFINE_integer('batch_size', 128, 'Batch size. ')
+tf.flags.DEFINE_integer('total_epochs', 1000, 'Number of epochs for training')
+tf.flags.DEFINE_float('base_learning_rate', 0.01, 'Base learning rate for learning rate decay')
 
 tf.logging.set_verbosity(tf.logging.DEBUG)
 
@@ -34,14 +35,15 @@ def estimator_model_fn(features, labels, mode, params):
         domain_labels_target = [1] * tf.shape(input_layer_target)[0]
         domain_labels_target = tf.one_hot(domain_labels_target, 2)
         # Apply DANN model to both input layers
+        # TODO !!! CALCULATE CORRECT ALPHA VALUE FOR REVGRAD!
         class_logits_source, domain_logits_source = dann_model_fn(input_layer_source, is_training=True)
         _, domain_logits_target = dann_model_fn(input_layer_target, is_training=True)
         class_loss = tf.losses.softmax_cross_entropy(class_labels, logits=class_logits_source)
         domain_loss_source = tf.losses.softmax_cross_entropy(domain_labels_source, logits=domain_logits_source)
         domain_loss_target = tf.losses.softmax_cross_entropy(domain_labels_target, logits=domain_logits_target)
         total_loss = tf.reduce_mean(class_loss) + tf.reduce_mean(domain_loss_source) + tf.reduce_mean(domain_loss_target)
-        learning_rate = utilities.lr_annealing(learning_rate=0.01, global_step=tf.train.get_global_step(),
-                                               total_steps=params['total_steps'], alpha=10, beta=0.75)
+        learning_rate = utilities.lr_annealing(learning_rate=FLAGS.base_learning_rate, global_step=tf.train.get_global_step(),
+                                               alpha=0.001, beta=0.75)
         global_step = tf.train.get_global_step()
         tf.identity(learning_rate, 'learning_rate')
         tf.identity(global_step, 'global_step')
@@ -109,13 +111,12 @@ def main(_):
         model_dir="./model",
         params={
             'feature_columns': feature_columns,
-            'total_steps': total_steps_training
         }
     )
     # Set up logging in training mode
     logging_hook = tf.train.LoggingTensorHook(
         tensors={"lr": "learning_rate", "gs": "global_step"},
-        every_n_iter=1)
+        every_n_iter=100)
     # Train DANN
     classifier.train(
         input_fn=lambda: dp.train_input_fn({'x_s': x_train, 'x_t': x_m_train}, y_train, FLAGS.batch_size),

@@ -21,5 +21,5 @@ def lr_annealing(learning_rate, global_step, alpha, beta, name=None):
         alpha = math_ops.cast(alpha, dtype)
         beta = math_ops.cast(beta, dtype)
         base = math_ops.multiply(alpha, global_step)
-        base = math_ops.add(1, base)
+        base = math_ops.add(1., base)
         return math_ops.multiply(learning_rate, math_ops.pow(base, -beta), name=name)
