@@ -37,6 +37,7 @@ def load_data():
 
 def train_input_fn(features, labels, batch_size):
     """An input function for training"""
+    print(batch_size)
     # Convert the inputs to a Dataset.
     dataset = tf.data.Dataset.from_tensor_slices((features, labels))
 
