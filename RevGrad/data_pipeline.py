@@ -22,7 +22,7 @@ def load_data():
     # x_train, x_test = x_train / 255.0, x_test / 255.0
 
     # Get mnistm
-    x_train_m, y_train_m, x_test_m, y_test_m = mnistm['X_train'], mnistm['Y_train'], mnistm['X_test'], mnistm['Y_train']
+    x_train_m, y_train_m, x_test_m, y_test_m = mnistm['X_train'], mnistm['Y_train'], mnistm['X_test'], mnistm['Y_test']
     # Normalize
     # x_train_m, x_test_m = x_train_m / 255.0, x_test_m / 255.0
 

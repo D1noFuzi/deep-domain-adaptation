@@ -23,3 +23,16 @@ def lr_annealing(learning_rate, global_step, alpha, beta, name=None):
         base = math_ops.multiply(alpha, global_step)
         base = math_ops.add(1., base)
         return math_ops.multiply(learning_rate, math_ops.pow(base, -beta), name=name)
+
+
+def reverse_gradient_weight(current_epoch, total_epochs, gamma):
+    dtype = 'float32'
+    current_epoch = math_ops.cast(current_epoch, dtype)
+    total_epochs = math_ops.cast(total_epochs, dtype)
+    gamma = math_ops.cast(gamma, dtype)
+    p = math_ops.divide(current_epoch, total_epochs)
+    alpha = math_ops.multiply(-gamma, p)
+    alpha = math_ops.exp(alpha)
+    alpha = math_ops.add(1., alpha)
+    alpha = math_ops.divide(2., alpha)
+    return math_ops.add(alpha, -1.)

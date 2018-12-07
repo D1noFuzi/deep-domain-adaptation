@@ -17,48 +17,66 @@ tf.logging.set_verbosity(tf.logging.DEBUG)
 
 def estimator_model_fn(features, labels, mode, params):
     """The estimator function"""
-    batch_size = tf.shape(features['x_s'])[0]
+    input_layer_source = tf.cast(tf.reshape(features['x_s'], shape=[-1, 32, 32, 3]), dtype='float32')
+    input_layer_target = tf.cast(tf.reshape(features['x_t'], shape=[-1, 32, 32, 3]), dtype='float32')
+    batch_size = tf.shape(input_layer_source)[0]
     # features['x_s'] = tf.Print(features['x_s'], [tf.shape(features['x_s'])], "Features shape..")
-    input_layer_source = tf.feature_column.input_layer({"x_s": features['x_s']}, params['feature_columns'][0])
-    input_layer_target = tf.feature_column.input_layer({"x_t": features['x_t']}, params['feature_columns'][1])
-    # CNNs need input data to be of shape [batch_size, width, height, channel]
-    input_layer_source = tf.reshape(input_layer_source, [batch_size, 32, 32, 3])
-    input_layer_target = tf.reshape(input_layer_target, [batch_size, 32, 32, 3])
-    # input_layer_source = tf.Print(input_layer_source, [tf.shape(input_layer_source)], "Input layer source shape after")
+    # input_layer_source = tf.feature_column.input_layer({"x_s": input_layer_source}, params['feature_columns'][0])
+    # input_layer_target = tf.feature_column.input_layer({"x_t": input_layer_target}, params['feature_columns'][1])
+    # # CNNs need input data to be of shape [batch_size, width, height, channel]
+    # input_layer_source = tf.reshape(input_layer_source, [batch_size, 32, 32, 3])
+    # input_layer_target = tf.reshape(input_layer_target, [batch_size, 32, 32, 3])
+    batch_size = tf.Print(batch_size, [tf.shape(input_layer_source)], "batch_size..")
 
     if mode == tf.estimator.ModeKeys.PREDICT:
-        # To be implemented
+        # TODO: To be implemented
         return
-
-    if mode == tf.estimator.ModeKeys.TRAIN:
+    if mode in [tf.estimator.ModeKeys.TRAIN, tf.estimator.ModeKeys.EVAL]:
         iter_ratio = params['iter_ratio']
         current_epoch = math_ops.ceil(math_ops.divide(tf.train.get_global_step(), iter_ratio))
-        p = math_ops.divide(current_epoch, FLAGS.total_epochs)
-        alpha = math_ops.multiply(-10, p)
-        alpha = math_ops.exp(alpha)
-        alpha = math_ops.add(1, alpha)
-        alpha = math_ops.divide(2, alpha)
-        alpha = math_ops.add(alpha, -1)
+        alpha = utilities.reverse_gradient_weight(current_epoch, FLAGS.total_epochs, 10.)
+        # Apply DANN model to both input layers
+        class_logits_source, domain_logits_source = dann_model_fn(input_layer_source, alpha=alpha, is_training=True)
+        class_logits_domain, domain_logits_target = dann_model_fn(input_layer_target, alpha=alpha, is_training=True)
+
         # Gotta change labels to one-hot
-        class_labels = tf.one_hot(labels, 10)
+        class_labels = tf.one_hot(labels['y_s'], 10)
         domain_labels_source = [0] * 128  # tf.shape(input_layer_source)[0]
         domain_labels_source = tf.one_hot(domain_labels_source, 2)
         domain_labels_target = [1] * 128  # tf.shape(input_layer_target)[0]
         domain_labels_target = tf.one_hot(domain_labels_target, 2)
-        # Apply DANN model to both input layers
-        # TODO !!! CALCULATE CORRECT ALPHA VALUE FOR REVGRAD!
-        class_logits_source, domain_logits_source = dann_model_fn(input_layer_source, alpha=alpha, is_training=True)
-        _, domain_logits_target = dann_model_fn(input_layer_target, alpha=alpha, is_training=True)
+
+        # Compute losses
         class_loss = tf.losses.softmax_cross_entropy(class_labels, logits=class_logits_source)
         domain_loss_source = tf.losses.softmax_cross_entropy(domain_labels_source, logits=domain_logits_source)
         domain_loss_target = tf.losses.softmax_cross_entropy(domain_labels_target, logits=domain_logits_target)
         total_loss = tf.reduce_mean(class_loss) + tf.reduce_mean(domain_loss_source) + tf.reduce_mean(domain_loss_target)
+
+        # Get predicted classes
+        predicted_classes_source = tf.argmax(class_logits_source, axis=1)
+        predicted_classes_domain = tf.argmax(class_logits_domain, axis=1)
+        source_class_acc = tf.metrics.accuracy(labels=labels['y_s'],
+                                               predictions=predicted_classes_source,
+                                               name='source_class_acc_op')
+        domain_class_acc = tf.metrics.accuracy(labels=labels['y_t'],
+                                               predictions=predicted_classes_domain,
+                                               name='domain_class_acc_op')
+        metrics = {'source_class_acc': source_class_acc, 'domain_class_acc': domain_class_acc}
+        #tf.summary.scalar('source_class_acc', source_class_acc[1])
+        #tf.summary.scalar('domain_class_acc', domain_class_acc[1])
+        # Evaluate if in EVAL
+        if mode == tf.estimator.ModeKeys.EVAL:
+            return tf.estimator.EstimatorSpec(
+                mode, loss=total_loss, eval_metric_ops=metrics)
+
         learning_rate = utilities.lr_annealing(learning_rate=FLAGS.base_learning_rate,
                                                global_step=tf.train.get_global_step(),
                                                alpha=0.001,
                                                beta=0.75)
         tf.identity(learning_rate, 'learning_rate')
         tf.identity(total_loss, 'loss')
+        tf.identity(source_class_acc[1], 'source_class_acc')
+        tf.identity(domain_class_acc[1], 'domain_class_acc')
         optimizer = tf.train.MomentumOptimizer(learning_rate, momentum=0.9)
         train_op = optimizer.minimize(total_loss, global_step=tf.train.get_global_step())
         return tf.estimator.EstimatorSpec(mode, loss=total_loss, train_op=train_op)
@@ -85,7 +103,7 @@ def dann_model_fn(input_layer, alpha=1.0, is_training=False):
         class_out = tf.layers.dense(class_out, 100)
         class_out = tf.layers.batch_normalization(class_out, training=is_training)
         class_out = tf.nn.relu(class_out)
-        class_logits = tf.layers.dense(class_out, 10, name='class_logit')
+        class_logits = tf.layers.dense(class_out, units=10, name='class_logit')
     with tf.variable_scope('domain_classifier', reuse=tf.AUTO_REUSE):
         # Flip gradient when domain classifier is backpropagated
         grad_name = "RevGrad%d" % random.randint(1, 1000)
@@ -114,30 +132,37 @@ def main(_):
     print(iter_ratio)
 
     # We are working with transformed MNIST dataset => image shape is 32x32x3
-    feature_columns = [tf.feature_column.numeric_column("x_s", shape=(32, 32, 3)),
-                       tf.feature_column.numeric_column("x_t", shape=(32, 32, 3))]
+    # feature_columns = [tf.feature_column.numeric_column("x_s", shape=(32, 32, 3)),
+    #                    tf.feature_column.numeric_column("x_t", shape=(32, 32, 3))]
 
     # Set up the estimator
     classifier = tf.estimator.Estimator(
         model_fn=estimator_model_fn,
         model_dir="./model",
         params={
-            'feature_columns': feature_columns,
+            #  'feature_columns': feature_columns,
             'iter_ratio': iter_ratio
         }
     )
     # Set up logging in training mode
     logging_hook = tf.train.LoggingTensorHook(
-        tensors={"lr": "learning_rate", "loss": "loss"},
+        tensors={"lr": "learning_rate", "loss": "loss", "source_class_acc": "source_class_acc",
+                 "domain_class_acc": "domain_class_acc"},
         every_n_iter=1)
     # Train DANN
     classifier.train(
         # input_fn=lambda: dp.train_input_fn({'x_s': x_train, 'x_t': x_m_train}, y_train, FLAGS.batch_size),
-        input_fn=tf.estimator.inputs.numpy_input_fn({'x_s': x_train, 'x_t': x_m_train}, y_train, shuffle=True,
-                                                    batch_size=128, num_epochs=FLAGS.total_epochs),
+        input_fn=tf.estimator.inputs.numpy_input_fn({'x_s': x_train, 'x_t': x_m_train}, {'y_s': y_train, 'y_t': y_m_train},
+                                                    shuffle=True, batch_size=128, num_epochs=FLAGS.total_epochs),
         max_steps=int(iter_ratio*FLAGS.total_epochs),
         hooks=[logging_hook]
     )
+    # Evaluate DANN
+    # eval_result = classifier.evaluate(
+    #     input_fn=tf.estimator.inputs.numpy_input_fn({'x_s': x_test, 'x_t': x_m_test}, {'y_s': y_test, 'y_t': y_m_test},
+    #                                                 batch_size=128, num_epochs=1, shuffle=False)
+    # )
+    # print('\nTest set accuracy: {accuracy:0.3f}\n'.format(**eval_result))
 
 
 if __name__ == '__main__':
