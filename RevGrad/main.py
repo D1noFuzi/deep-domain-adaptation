@@ -17,6 +17,8 @@ tf.logging.set_verbosity(tf.logging.DEBUG)
 
 def estimator_model_fn(features, labels, mode, params):
     """The estimator function"""
+    #  features['x_s'] = tf.Print(features['x_s'], [tf.shape(features['x_s'])], "Feature source shape ")
+
     input_layer_source = tf.cast(tf.reshape(features['x_s'], shape=[-1, 32, 32, 3]), dtype='float32')
     input_layer_target = tf.cast(tf.reshape(features['x_t'], shape=[-1, 32, 32, 3]), dtype='float32')
     batch_size = tf.shape(input_layer_source)[0]
@@ -26,25 +28,28 @@ def estimator_model_fn(features, labels, mode, params):
     # # CNNs need input data to be of shape [batch_size, width, height, channel]
     # input_layer_source = tf.reshape(input_layer_source, [batch_size, 32, 32, 3])
     # input_layer_target = tf.reshape(input_layer_target, [batch_size, 32, 32, 3])
-    batch_size = tf.Print(batch_size, [tf.shape(input_layer_source)], "batch_size..")
+    # batch_size = tf.Print(batch_size, [tf.shape(input_layer_source)], "batch_size..")
 
     if mode == tf.estimator.ModeKeys.PREDICT:
         # TODO: To be implemented
         return
     if mode in [tf.estimator.ModeKeys.TRAIN, tf.estimator.ModeKeys.EVAL]:
+        is_training = mode == tf.estimator.ModeKeys.TRAIN
         iter_ratio = params['iter_ratio']
         current_epoch = math_ops.ceil(math_ops.divide(tf.train.get_global_step(), iter_ratio))
         alpha = utilities.reverse_gradient_weight(current_epoch, FLAGS.total_epochs, 10.)
         # Apply DANN model to both input layers
-        class_logits_source, domain_logits_source = dann_model_fn(input_layer_source, alpha=alpha, is_training=True)
-        class_logits_domain, domain_logits_target = dann_model_fn(input_layer_target, alpha=alpha, is_training=True)
+        # input_layer_source = tf.Print(input_layer_source, [tf.shape(input_layer_source)], "Input source shape ")
+        class_logits_source, domain_logits_source = dann_model_fn(input_layer_source, alpha=alpha, is_training=is_training)
+        class_logits_domain, domain_logits_target = dann_model_fn(input_layer_target, alpha=alpha, is_training=is_training)
 
         # Gotta change labels to one-hot
-        class_labels = tf.one_hot(labels['y_s'], 10)
-        domain_labels_source = [0] * 128  # tf.shape(input_layer_source)[0]
-        domain_labels_source = tf.one_hot(domain_labels_source, 2)
-        domain_labels_target = [1] * 128  # tf.shape(input_layer_target)[0]
-        domain_labels_target = tf.one_hot(domain_labels_target, 2)
+        with tf.control_dependencies([class_logits_source]):
+            class_labels = tf.one_hot(labels['y_s'], 10)
+            domain_labels_source = tf.tile(tf.constant([0]), [tf.shape(features['x_s'])[0]])  # tf.shape(input_layer_source)[0]
+            domain_labels_source = tf.one_hot(domain_labels_source, 2)
+            domain_labels_target = tf.tile(tf.constant([1]), [tf.shape(features['x_t'])[0]])  # tf.shape(input_layer_target)[0]
+            domain_labels_target = tf.one_hot(domain_labels_target, 2)
 
         # Compute losses
         class_loss = tf.losses.softmax_cross_entropy(class_labels, logits=class_logits_source)
@@ -58,10 +63,10 @@ def estimator_model_fn(features, labels, mode, params):
         source_class_acc = tf.metrics.accuracy(labels=labels['y_s'],
                                                predictions=predicted_classes_source,
                                                name='source_class_acc_op')
-        domain_class_acc = tf.metrics.accuracy(labels=labels['y_t'],
+        target_class_acc = tf.metrics.accuracy(labels=labels['y_t'],
                                                predictions=predicted_classes_domain,
-                                               name='domain_class_acc_op')
-        metrics = {'source_class_acc': source_class_acc, 'domain_class_acc': domain_class_acc}
+                                               name='target_class_acc_op')
+        metrics = {'source_class_acc': source_class_acc, 'target_class_acc': target_class_acc}
         #tf.summary.scalar('source_class_acc', source_class_acc[1])
         #tf.summary.scalar('domain_class_acc', domain_class_acc[1])
         # Evaluate if in EVAL
@@ -76,7 +81,7 @@ def estimator_model_fn(features, labels, mode, params):
         tf.identity(learning_rate, 'learning_rate')
         tf.identity(total_loss, 'loss')
         tf.identity(source_class_acc[1], 'source_class_acc')
-        tf.identity(domain_class_acc[1], 'domain_class_acc')
+        tf.identity(target_class_acc[1], 'target_class_acc')
         optimizer = tf.train.MomentumOptimizer(learning_rate, momentum=0.9)
         train_op = optimizer.minimize(total_loss, global_step=tf.train.get_global_step())
         return tf.estimator.EstimatorSpec(mode, loss=total_loss, train_op=train_op)
@@ -85,6 +90,7 @@ def estimator_model_fn(features, labels, mode, params):
 def dann_model_fn(input_layer, alpha=1.0, is_training=False):
     """The actual DANN model architecture"""
     with tf.variable_scope('feature_extractor', reuse=tf.AUTO_REUSE):
+        # input_layer = tf.Print(input_layer, [tf.shape(input_layer)], "Input shape before flatten ")
         out = tf.layers.conv2d(input_layer, filters=64, kernel_size=5)
         out = tf.layers.batch_normalization(out, training=is_training)
         out = tf.layers.max_pooling2d(out, 2, 2)
@@ -94,6 +100,7 @@ def dann_model_fn(input_layer, alpha=1.0, is_training=False):
         out = tf.layers.dropout(out, training=is_training)
         out = tf.layers.max_pooling2d(out, 2, 2)
         out = tf.nn.relu(out)
+        # out = tf.Print(out, [tf.shape(out)], "Out shape before flatten ")
         out = tf.layers.flatten(out)
     with tf.variable_scope('class_classifier', reuse=tf.AUTO_REUSE):
         class_out = tf.layers.dense(out, 100)
@@ -147,22 +154,25 @@ def main(_):
     # Set up logging in training mode
     logging_hook = tf.train.LoggingTensorHook(
         tensors={"lr": "learning_rate", "loss": "loss", "source_class_acc": "source_class_acc",
-                 "domain_class_acc": "domain_class_acc"},
+                 "target_class_acc": "target_class_acc"},
         every_n_iter=1)
     # Train DANN
-    classifier.train(
-        # input_fn=lambda: dp.train_input_fn({'x_s': x_train, 'x_t': x_m_train}, y_train, FLAGS.batch_size),
-        input_fn=tf.estimator.inputs.numpy_input_fn({'x_s': x_train, 'x_t': x_m_train}, {'y_s': y_train, 'y_t': y_m_train},
-                                                    shuffle=True, batch_size=128, num_epochs=FLAGS.total_epochs),
-        max_steps=int(iter_ratio*FLAGS.total_epochs),
-        hooks=[logging_hook]
-    )
-    # Evaluate DANN
-    # eval_result = classifier.evaluate(
-    #     input_fn=tf.estimator.inputs.numpy_input_fn({'x_s': x_test, 'x_t': x_m_test}, {'y_s': y_test, 'y_t': y_m_test},
-    #                                                 batch_size=128, num_epochs=1, shuffle=False)
+    # classifier.train(
+    #     # input_fn=lambda: dp.train_input_fn({'x_s': x_train, 'x_t': x_m_train}, y_train, FLAGS.batch_size),
+    #     input_fn=tf.estimator.inputs.numpy_input_fn({'x_s': x_train, 'x_t': x_m_train}, {'y_s': y_train, 'y_t': y_m_train},
+    #                                                 shuffle=True, batch_size=128, num_epochs=FLAGS.total_epochs),
+    #     max_steps=int(iter_ratio*FLAGS.total_epochs),
+    #     hooks=[logging_hook]
     # )
-    # print('\nTest set accuracy: {accuracy:0.3f}\n'.format(**eval_result))
+    # Evaluate DANN
+    eval_result = classifier.evaluate(
+        input_fn=tf.estimator.inputs.numpy_input_fn(x={'x_s': x_test, 'x_t': x_m_test},
+                                                    y={'y_s': y_test, 'y_t': y_m_test},
+                                                    batch_size=128,
+                                                    num_epochs=1,
+                                                    shuffle=False, )
+    )
+    print('\nSource set accuracy: {source_class_acc:0.3f}\nTarget set accuracy: {target_class_acc:0.3f}\n'.format(**eval_result))
 
 
 if __name__ == '__main__':
