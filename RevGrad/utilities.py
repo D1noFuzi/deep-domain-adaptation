@@ -1,26 +1,32 @@
+import tensorflow as tf
 from tensorflow.python.framework import constant_op
 from tensorflow.python.framework import ops
 from tensorflow.python.ops import control_flow_ops
 from tensorflow.python.ops import math_ops
 
 
-def lr_annealing(learning_rate, global_step, alpha, beta, name=None):
+def non_streaming_accuracy(predictions, labels):
+    return tf.reduce_mean(tf.cast(tf.equal(predictions, labels), tf.float32))
+
+def lr_annealing(learning_rate, current_epoch, total_epochs, alpha, beta, name=None):
     """
     Applies learning rate annealing to the initial learning rate
-    return lr_p = learning_rate * (1 + alpha * global_step)^(-beta)
+    return lr_p = learning_rate * (1 + alpha * (current_epoch/global_step))^(-beta)
 
     Args:   learning_rate:
             global_step: number of iterations
             alpha:
             beta:
     """
-    with ops.name_scope(name, "Lr_Annealing", [learning_rate, global_step, alpha, beta]) as name:
+    with ops.name_scope(name, "Lr_Annealing", [learning_rate, current_epoch, total_epochs, alpha, beta]) as name:
         learning_rate = ops.convert_to_tensor(learning_rate, name="learning_rate")
         dtype = learning_rate.dtype
-        global_step = math_ops.cast(global_step, dtype)
+        current_epoch = math_ops.cast(current_epoch, dtype)
+        total_epochs = math_ops.cast(total_epochs, dtype)
         alpha = math_ops.cast(alpha, dtype)
         beta = math_ops.cast(beta, dtype)
-        base = math_ops.multiply(alpha, global_step)
+        epoch_ratio = math_ops.divide(current_epoch, total_epochs)
+        base = math_ops.multiply(alpha, epoch_ratio)
         base = math_ops.add(1., base)
         return math_ops.multiply(learning_rate, math_ops.pow(base, -beta), name=name)
 

@@ -9,7 +9,7 @@ import random
 
 FLAGS = tf.flags.FLAGS
 tf.flags.DEFINE_integer('batch_size', 128, 'Batch size. ')
-tf.flags.DEFINE_integer('total_epochs', 1000, 'Number of epochs for training')
+tf.flags.DEFINE_integer('total_epochs', 100, 'Number of epochs for training')
 tf.flags.DEFINE_float('base_learning_rate', 0.01, 'Base learning rate for learning rate decay')
 
 tf.logging.set_verbosity(tf.logging.DEBUG)
@@ -19,15 +19,15 @@ def estimator_model_fn(features, labels, mode, params):
     """The estimator function"""
     #  features['x_s'] = tf.Print(features['x_s'], [tf.shape(features['x_s'])], "Feature source shape ")
 
-    input_layer_source = tf.cast(tf.reshape(features['x_s'], shape=[-1, 32, 32, 3]), dtype='float32')
-    input_layer_target = tf.cast(tf.reshape(features['x_t'], shape=[-1, 32, 32, 3]), dtype='float32')
-    batch_size = tf.shape(input_layer_source)[0]
+    # input_layer_source = tf.cast(tf.reshape(features['x_s'], shape=[-1, 28, 28, 3]), dtype='float32')
+    # input_layer_target = tf.cast(tf.reshape(features['x_t'], shape=[-1, 28, 28, 3]), dtype='float32')
+    batch_size = tf.shape(features['x_s'])[0]
     # features['x_s'] = tf.Print(features['x_s'], [tf.shape(features['x_s'])], "Features shape..")
-    # input_layer_source = tf.feature_column.input_layer({"x_s": input_layer_source}, params['feature_columns'][0])
-    # input_layer_target = tf.feature_column.input_layer({"x_t": input_layer_target}, params['feature_columns'][1])
-    # # CNNs need input data to be of shape [batch_size, width, height, channel]
-    # input_layer_source = tf.reshape(input_layer_source, [batch_size, 32, 32, 3])
-    # input_layer_target = tf.reshape(input_layer_target, [batch_size, 32, 32, 3])
+    input_layer_source = tf.feature_column.input_layer({"x_s": features['x_s']}, params['feature_columns'][0])
+    input_layer_target = tf.feature_column.input_layer({"x_t": features['x_t']}, params['feature_columns'][1])
+    # CNNs need input data to be of shape [batch_size, width, height, channel]
+    input_layer_source = tf.reshape(input_layer_source, [batch_size, 28, 28, 3])
+    input_layer_target = tf.reshape(input_layer_target, [batch_size, 28, 28, 3])
     # batch_size = tf.Print(batch_size, [tf.shape(input_layer_source)], "batch_size..")
 
     if mode == tf.estimator.ModeKeys.PREDICT:
@@ -46,9 +46,9 @@ def estimator_model_fn(features, labels, mode, params):
         # Gotta change labels to one-hot
         with tf.control_dependencies([class_logits_source]):
             class_labels = tf.one_hot(labels['y_s'], 10)
-            domain_labels_source = tf.tile(tf.constant([0]), [tf.shape(features['x_s'])[0]])  # tf.shape(input_layer_source)[0]
+            domain_labels_source = tf.tile(tf.constant([0]), [tf.shape(features['x_s'])[0]])
             domain_labels_source = tf.one_hot(domain_labels_source, 2)
-            domain_labels_target = tf.tile(tf.constant([1]), [tf.shape(features['x_t'])[0]])  # tf.shape(input_layer_target)[0]
+            domain_labels_target = tf.tile(tf.constant([1]), [tf.shape(features['x_t'])[0]])
             domain_labels_target = tf.one_hot(domain_labels_target, 2)
 
         # Compute losses
@@ -58,30 +58,35 @@ def estimator_model_fn(features, labels, mode, params):
         total_loss = tf.reduce_mean(class_loss) + tf.reduce_mean(domain_loss_source) + tf.reduce_mean(domain_loss_target)
 
         # Get predicted classes
-        predicted_classes_source = tf.argmax(class_logits_source, axis=1)
-        predicted_classes_domain = tf.argmax(class_logits_domain, axis=1)
-        source_class_acc = tf.metrics.accuracy(labels=labels['y_s'],
-                                               predictions=predicted_classes_source,
-                                               name='source_class_acc_op')
-        target_class_acc = tf.metrics.accuracy(labels=labels['y_t'],
-                                               predictions=predicted_classes_domain,
-                                               name='target_class_acc_op')
-        metrics = {'source_class_acc': source_class_acc, 'target_class_acc': target_class_acc}
-        #tf.summary.scalar('source_class_acc', source_class_acc[1])
-        #tf.summary.scalar('domain_class_acc', domain_class_acc[1])
+        predicted_classes_source = tf.argmax(class_logits_source, axis=1, output_type=tf.int32)
+        predicted_classes_domain = tf.argmax(class_logits_domain, axis=1, output_type=tf.int32)
+
         # Evaluate if in EVAL
         if mode == tf.estimator.ModeKeys.EVAL:
+            source_class_acc = tf.metrics.accuracy(labels=labels['y_s'],
+                                                   predictions=predicted_classes_source,
+                                                   name='source_class_acc_op')
+            target_class_acc = tf.metrics.accuracy(labels=labels['y_t'],
+                                                   predictions=predicted_classes_domain,
+                                                   name='target_class_acc_op')
+            metrics = {'source_class_acc': source_class_acc, 'target_class_acc': target_class_acc}
             return tf.estimator.EstimatorSpec(
                 mode, loss=total_loss, eval_metric_ops=metrics)
 
+        # Calculate a non streaming (per batch) accuracy
+        source_class_acc = utilities.non_streaming_accuracy(predicted_classes_source, tf.cast(labels['y_s'], tf.int32))
+        target_class_acc = utilities.non_streaming_accuracy(predicted_classes_domain, tf.cast(labels['y_t'], tf.int32))
+
+        # Initialize learning rate
         learning_rate = utilities.lr_annealing(learning_rate=FLAGS.base_learning_rate,
-                                               global_step=tf.train.get_global_step(),
-                                               alpha=0.001,
+                                               current_epoch=current_epoch,
+                                               total_epochs=FLAGS.total_epochs,
+                                               alpha=10,
                                                beta=0.75)
         tf.identity(learning_rate, 'learning_rate')
         tf.identity(total_loss, 'loss')
-        tf.identity(source_class_acc[1], 'source_class_acc')
-        tf.identity(target_class_acc[1], 'target_class_acc')
+        tf.identity(source_class_acc, 'source_class_acc')
+        tf.identity(target_class_acc, 'target_class_acc')
         optimizer = tf.train.MomentumOptimizer(learning_rate, momentum=0.9)
         train_op = optimizer.minimize(total_loss, global_step=tf.train.get_global_step())
         return tf.estimator.EstimatorSpec(mode, loss=total_loss, train_op=train_op)
@@ -136,18 +141,17 @@ def main(_):
 
     # Configurations first
     iter_ratio = math.ceil((x_train.shape[0] / FLAGS.batch_size))
-    print(iter_ratio)
 
-    # We are working with transformed MNIST dataset => image shape is 32x32x3
-    # feature_columns = [tf.feature_column.numeric_column("x_s", shape=(32, 32, 3)),
-    #                    tf.feature_column.numeric_column("x_t", shape=(32, 32, 3))]
+    # We are working with transformed MNIST dataset => image shape is 28x28x3
+    feature_columns = [tf.feature_column.numeric_column("x_s", shape=(28, 28, 3)),
+                       tf.feature_column.numeric_column("x_t", shape=(28, 28, 3))]
 
     # Set up the estimator
     classifier = tf.estimator.Estimator(
         model_fn=estimator_model_fn,
         model_dir="./model",
         params={
-            #  'feature_columns': feature_columns,
+            'feature_columns': feature_columns,
             'iter_ratio': iter_ratio
         }
     )
@@ -157,22 +161,22 @@ def main(_):
                  "target_class_acc": "target_class_acc"},
         every_n_iter=1)
     # Train DANN
-    # classifier.train(
-    #     # input_fn=lambda: dp.train_input_fn({'x_s': x_train, 'x_t': x_m_train}, y_train, FLAGS.batch_size),
-    #     input_fn=tf.estimator.inputs.numpy_input_fn({'x_s': x_train, 'x_t': x_m_train}, {'y_s': y_train, 'y_t': y_m_train},
-    #                                                 shuffle=True, batch_size=128, num_epochs=FLAGS.total_epochs),
-    #     max_steps=int(iter_ratio*FLAGS.total_epochs),
-    #     hooks=[logging_hook]
-    # )
-    # Evaluate DANN
-    eval_result = classifier.evaluate(
-        input_fn=tf.estimator.inputs.numpy_input_fn(x={'x_s': x_test, 'x_t': x_m_test},
-                                                    y={'y_s': y_test, 'y_t': y_m_test},
-                                                    batch_size=128,
-                                                    num_epochs=1,
-                                                    shuffle=False, )
+    classifier.train(
+        # input_fn=lambda: dp.train_input_fn({'x_s': x_train, 'x_t': x_m_train}, y_train, FLAGS.batch_size),
+        input_fn=tf.estimator.inputs.numpy_input_fn({'x_s': x_train, 'x_t': x_m_train}, {'y_s': y_train, 'y_t': y_m_train},
+                                                    shuffle=True, batch_size=128, num_epochs=FLAGS.total_epochs),
+        max_steps=int(iter_ratio*FLAGS.total_epochs),
+        hooks=[logging_hook]
     )
-    print('\nSource set accuracy: {source_class_acc:0.3f}\nTarget set accuracy: {target_class_acc:0.3f}\n'.format(**eval_result))
+    # Evaluate DANN
+    # eval_result = classifier.evaluate(
+    #     input_fn=tf.estimator.inputs.numpy_input_fn(x={'x_s': x_test, 'x_t': x_m_test},
+    #                                                 y={'y_s': y_test, 'y_t': y_m_test},
+    #                                                 batch_size=128,
+    #                                                 num_epochs=1,
+    #                                                 shuffle=False)
+    # )
+    # print('\nSource set accuracy: {source_class_acc:0.3f}\nTarget set accuracy: {target_class_acc:0.3f}\n'.format(**eval_result))
 
 
 if __name__ == '__main__':
