@@ -35,6 +35,7 @@ def estimator_model_fn(features, labels, mode, params):
         return
     if mode in [tf.estimator.ModeKeys.TRAIN, tf.estimator.ModeKeys.EVAL]:
         is_training = mode == tf.estimator.ModeKeys.TRAIN
+        # is_training = True
         iter_ratio = params['iter_ratio']
         current_epoch = math_ops.ceil(math_ops.divide(tf.train.get_global_step(), iter_ratio))
         alpha = utilities.reverse_gradient_weight(current_epoch, FLAGS.total_epochs, 10.)
@@ -70,6 +71,10 @@ def estimator_model_fn(features, labels, mode, params):
                                                    predictions=predicted_classes_domain,
                                                    name='target_class_acc_op')
             metrics = {'source_class_acc': source_class_acc, 'target_class_acc': target_class_acc}
+            source_class_acc_2 = utilities.non_streaming_accuracy(predicted_classes_source, tf.cast(labels['y_s'], tf.int32))
+            target_class_acc_2 = utilities.non_streaming_accuracy(predicted_classes_domain, tf.cast(labels['y_t'], tf.int32))
+            tf.identity(source_class_acc_2, 'source_class_acc_2')
+            tf.identity(target_class_acc_2, 'target_class_acc_2')
             return tf.estimator.EstimatorSpec(
                 mode, loss=total_loss, eval_metric_ops=metrics)
 
@@ -88,7 +93,9 @@ def estimator_model_fn(features, labels, mode, params):
         tf.identity(source_class_acc, 'source_class_acc')
         tf.identity(target_class_acc, 'target_class_acc')
         optimizer = tf.train.MomentumOptimizer(learning_rate, momentum=0.9)
-        train_op = optimizer.minimize(total_loss, global_step=tf.train.get_global_step())
+        update_ops = tf.get_collection(tf.GraphKeys.UPDATE_OPS)
+        with tf.control_dependencies(update_ops):
+            train_op = optimizer.minimize(total_loss, global_step=tf.train.get_global_step())
         return tf.estimator.EstimatorSpec(mode, loss=total_loss, train_op=train_op)
 
 
@@ -161,22 +168,26 @@ def main(_):
                  "target_class_acc": "target_class_acc"},
         every_n_iter=1)
     # Train DANN
-    classifier.train(
-        # input_fn=lambda: dp.train_input_fn({'x_s': x_train, 'x_t': x_m_train}, y_train, FLAGS.batch_size),
-        input_fn=tf.estimator.inputs.numpy_input_fn({'x_s': x_train, 'x_t': x_m_train}, {'y_s': y_train, 'y_t': y_m_train},
-                                                    shuffle=True, batch_size=128, num_epochs=FLAGS.total_epochs),
-        max_steps=int(iter_ratio*FLAGS.total_epochs),
-        hooks=[logging_hook]
-    )
-    # Evaluate DANN
-    # eval_result = classifier.evaluate(
-    #     input_fn=tf.estimator.inputs.numpy_input_fn(x={'x_s': x_test, 'x_t': x_m_test},
-    #                                                 y={'y_s': y_test, 'y_t': y_m_test},
-    #                                                 batch_size=128,
-    #                                                 num_epochs=1,
-    #                                                 shuffle=False)
+    # classifier.train(
+    #     # input_fn=lambda: dp.train_input_fn({'x_s': x_train, 'x_t': x_m_train}, y_train, FLAGS.batch_size),
+    #     input_fn=tf.estimator.inputs.numpy_input_fn({'x_s': x_train, 'x_t': x_m_train}, {'y_s': y_train, 'y_t': y_m_train},
+    #                                                 shuffle=True, batch_size=128, num_epochs=FLAGS.total_epochs),
+    #     max_steps=int(iter_ratio*FLAGS.total_epochs),
+    #     hooks=[logging_hook]
     # )
-    # print('\nSource set accuracy: {source_class_acc:0.3f}\nTarget set accuracy: {target_class_acc:0.3f}\n'.format(**eval_result))
+    # Evaluate DANN
+    eval_hooks = tf.train.LoggingTensorHook(
+        tensors={"source_class_acc_2": "source_class_acc_2", "target_class_acc_2": "target_class_acc_2"},
+        every_n_iter=1)
+    eval_result = classifier.evaluate(
+        input_fn=tf.estimator.inputs.numpy_input_fn(x={'x_s': x_test, 'x_t': x_m_test},
+                                                    y={'y_s': y_test, 'y_t': y_m_test},
+                                                    batch_size=128,
+                                                    num_epochs=1,
+                                                    shuffle=False),
+        hooks=[eval_hooks]
+    )
+    print('\nSource set accuracy: {source_class_acc:0.3f}\nTarget set accuracy: {target_class_acc:0.3f}\n'.format(**eval_result))
 
 
 if __name__ == '__main__':
