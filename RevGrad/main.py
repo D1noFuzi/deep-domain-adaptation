@@ -11,6 +11,7 @@ FLAGS = tf.flags.FLAGS
 tf.flags.DEFINE_integer('batch_size', 128, 'Batch size. ')
 tf.flags.DEFINE_integer('total_epochs', 100, 'Number of epochs for training')
 tf.flags.DEFINE_float('base_learning_rate', 0.01, 'Base learning rate for learning rate decay')
+tf.flags.DEFINE_string('mode', 'train', 'Run the model in "train", "eval" or "predict" mode')
 
 tf.logging.set_verbosity(tf.logging.DEBUG)
 
@@ -162,32 +163,36 @@ def main(_):
             'iter_ratio': iter_ratio
         }
     )
-    # Set up logging in training mode
-    logging_hook = tf.train.LoggingTensorHook(
-        tensors={"lr": "learning_rate", "loss": "loss", "source_class_acc": "source_class_acc",
-                 "target_class_acc": "target_class_acc"},
-        every_n_iter=1)
-    # Train DANN
-    # classifier.train(
-    #     # input_fn=lambda: dp.train_input_fn({'x_s': x_train, 'x_t': x_m_train}, y_train, FLAGS.batch_size),
-    #     input_fn=tf.estimator.inputs.numpy_input_fn({'x_s': x_train, 'x_t': x_m_train}, {'y_s': y_train, 'y_t': y_m_train},
-    #                                                 shuffle=True, batch_size=128, num_epochs=FLAGS.total_epochs),
-    #     max_steps=int(iter_ratio*FLAGS.total_epochs),
-    #     hooks=[logging_hook]
-    # )
-    # Evaluate DANN
-    eval_hooks = tf.train.LoggingTensorHook(
-        tensors={"source_class_acc_2": "source_class_acc_2", "target_class_acc_2": "target_class_acc_2"},
-        every_n_iter=1)
-    eval_result = classifier.evaluate(
-        input_fn=tf.estimator.inputs.numpy_input_fn(x={'x_s': x_test, 'x_t': x_m_test},
-                                                    y={'y_s': y_test, 'y_t': y_m_test},
-                                                    batch_size=128,
-                                                    num_epochs=1,
-                                                    shuffle=False),
-        hooks=[eval_hooks]
-    )
-    print('\nSource set accuracy: {source_class_acc:0.3f}\nTarget set accuracy: {target_class_acc:0.3f}\n'.format(**eval_result))
+    if FLAGS.mode == 'train':
+        # Set up logging in training mode
+        logging_hook = tf.train.LoggingTensorHook(
+            tensors={"lr": "learning_rate", "loss": "loss", "source_class_acc": "source_class_acc",
+                     "target_class_acc": "target_class_acc"},
+            every_n_iter=int(iter_ratio))
+        # Train DANN
+        classifier.train(
+            # input_fn=lambda: dp.train_input_fn({'x_s': x_train, 'x_t': x_m_train}, y_train, FLAGS.batch_size),
+            input_fn=tf.estimator.inputs.numpy_input_fn({'x_s': x_train, 'x_t': x_m_train}, {'y_s': y_train, 'y_t': y_m_train},
+                                                        shuffle=True, batch_size=128, num_epochs=FLAGS.total_epochs),
+            max_steps=int(iter_ratio*FLAGS.total_epochs),
+            hooks=[logging_hook]
+        )
+    if FLAGS.mode == 'eval':
+        # Evaluate DANN
+        eval_hooks = tf.train.LoggingTensorHook(
+            tensors={"source_class_acc_2": "source_class_acc_2", "target_class_acc_2": "target_class_acc_2"},
+            every_n_iter=1)
+        eval_result = classifier.evaluate(
+            input_fn=tf.estimator.inputs.numpy_input_fn(x={'x_s': x_test, 'x_t': x_m_test},
+                                                        y={'y_s': y_test, 'y_t': y_m_test},
+                                                        batch_size=128,
+                                                        num_epochs=1,
+                                                        shuffle=False),
+            hooks=[eval_hooks]
+        )
+        print('\nSource set accuracy: {source_class_acc:0.3f}\nTarget set accuracy: {target_class_acc:0.3f}\n'.format(**eval_result))
+
+    assert FLAGS.mode == 'predict', '-mode flag has to be one of "eval", "train", "predict".'
 
 
 if __name__ == '__main__':
