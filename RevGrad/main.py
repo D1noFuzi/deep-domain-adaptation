@@ -3,7 +3,7 @@ from tensorflow.python.framework import ops
 from tensorflow.python.ops import math_ops
 import data_pipeline as dp
 import math
-import utilities
+from utilities import utilities
 import random
 
 
@@ -48,9 +48,11 @@ def estimator_model_fn(features, labels, mode, params):
         # Gotta change labels to one-hot
         with tf.control_dependencies([class_logits_source]):
             class_labels = tf.one_hot(labels['y_s'], 10)
-            domain_labels_source = tf.tile(tf.constant([0]), [tf.shape(features['x_s'])[0]])
+            # domain_labels_source = tf.tile(tf.constant([0]), [tf.shape(features['x_s'])[0]])
+            domain_labels_source = tf.zeros([tf.shape(features['x_s'])[0]])
             domain_labels_source = tf.one_hot(domain_labels_source, 2)
-            domain_labels_target = tf.tile(tf.constant([1]), [tf.shape(features['x_t'])[0]])
+            # domain_labels_target = tf.tile(tf.constant([1]), [tf.shape(features['x_t'])[0]])
+            domain_labels_target = tf.ones([tf.shape(features['x_t'])[0]])
             domain_labels_target = tf.one_hot(domain_labels_target, 2)
 
         # Compute losses
@@ -149,10 +151,20 @@ def main(_):
 
     # Configurations first
     iter_ratio = math.ceil((x_train.shape[0] / FLAGS.batch_size))
-
+    print(iter_ratio)
     # We are working with transformed MNIST dataset => image shape is 28x28x3
     feature_columns = [tf.feature_column.numeric_column("x_s", shape=(28, 28, 3)),
                        tf.feature_column.numeric_column("x_t", shape=(28, 28, 3))]
+
+    # Set up the session config
+    session_config = tf.ConfigProto()
+    session_config.gpu_options.allow_growth = True
+
+    config = tf.estimator.RunConfig(
+        save_checkpoints_steps=int(iter_ratio),
+        log_step_count_steps=None,
+        session_config=session_config
+    )
 
     # Set up the estimator
     classifier = tf.estimator.Estimator(
@@ -161,7 +173,8 @@ def main(_):
         params={
             'feature_columns': feature_columns,
             'iter_ratio': iter_ratio
-        }
+        },
+        config=config
     )
     if FLAGS.mode == 'train':
         # Set up logging in training mode
