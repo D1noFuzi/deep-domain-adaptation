@@ -12,55 +12,69 @@ tf.flags.DEFINE_float('learning_rate', 0.001, 'Constant learning rate')
 tf.flags.DEFINE_string('mode', 'train', 'Run the model in "train", "eval" or "predict" mode')
 tf.flags.DEFINE_string('step', 'target', 'Either source or target - switch between source only training and '
                                          'target adversarial training')
+tf.flags.DEFINE_string('source', 'mnist', 'Either mnist, mnistm or svhn')
+tf.flags.DEFINE_string('target', 'mnistm', 'Either mnist, mnistm or svhn')
 tf.flags.DEFINE_integer('channel_size', 3, 'Either 1 or 3. Defaults to 3.')
+tf.flags.DEFINE_string('source_model', './model_source', 'Where to save the source model')
+tf.flags.DEFINE_string('target_model', './model_target', 'Where to save the target model')
+tf.flags.DEFINE_string('truncate_mnist', 'True', 'Either true or false. Truncates the mnist set to have same length')
+tf.flags.DEFINE_string('truncate_svhn', 'True', 'Either true or false. Truncates the svhn set to have same length')
 
 tf.logging.set_verbosity(tf.logging.DEBUG)
 
 
 def estimator_model_fn(features, labels, mode, params):
     """The estimator function"""
-    batch_size = tf.shape(features['source'])[0]
-
     if mode == tf.estimator.ModeKeys.PREDICT:
         # TODO: To be implemented
         return
 
     if FLAGS.step == 'source':
-        input_layer_source = tf.feature_column.input_layer({"source": features['source']}, params['feature_columns'])
+        input_layer_source = tf.feature_column.input_layer({"source": features['source']}, params['feature_columns'][0])
+        input_layer_target = tf.feature_column.input_layer({"target": features['target']}, params['feature_columns'][1])
         # CNNs need input data to be of shape [batch_size, width, height, channel]
-        input_layer_source = tf.reshape(input_layer_source, [batch_size, 28, 28, params['channel_size']])
+        input_layer_source = tf.reshape(input_layer_source, [-1, params['source_size'],
+                                                             params['source_size'], FLAGS.channel_size])
+        input_layer_target = tf.reshape(input_layer_target, [-1, params['target_size'],
+                                                             params['target_size'], FLAGS.channel_size])
 
-        out = lenet_encoder(input_layer_source, scope='source_encoder')
+        out_source = lenet_encoder(input_layer_source, scope='source_encoder')
+        out_target = lenet_encoder(input_layer_target, scope='source_encoder')
+        # Classify target for non-streaming accuracy
         with tf.variable_scope('classifier', reuse=tf.AUTO_REUSE):
-            logits = tf.layers.dense(out, 10)
-
-        # Gotta change labels to one-hot
-        class_labels = tf.one_hot(labels['labels'], 10)
-
+            class_logits_target = tf.layers.dense(out_target, 10)
+        with tf.variable_scope('classifier', reuse=tf.AUTO_REUSE):
+            class_logits_source = tf.layers.dense(out_source, 10)
         # Compute loss
-        class_loss = tf.losses.softmax_cross_entropy(class_labels, logits=logits)
+        class_loss = tf.losses.sparse_softmax_cross_entropy(labels=tf.cast(labels['label_s'], tf.int32),
+                                                            logits=class_logits_source)
 
         # Get predicted classes
-        predicted_classes_source = tf.argmax(logits, axis=1, output_type=tf.int32)
+        pred_classes_source = tf.argmax(class_logits_source, axis=1, output_type=tf.int32)
+        pred_classes_target = tf.argmax(class_logits_target, axis=1, output_type=tf.int32)
 
         # Evaluate if in EVAL
         if mode == tf.estimator.ModeKeys.EVAL:
-            source_class_acc = tf.metrics.accuracy(labels=labels['labels'],
-                                                   predictions=predicted_classes_source,
+            source_class_acc = tf.metrics.accuracy(labels=labels['label_s'],
+                                                   predictions=pred_classes_source,
                                                    name='source_class_acc_op')
-            metrics = {'source_class_acc': source_class_acc}
+            target_class_acc = tf.metrics.accuracy(labels=labels['label_t'],
+                                                   predictions=pred_classes_target,
+                                                   name='target_class_acc_op')
+            metrics = {'source_class_acc': source_class_acc,
+                       'target_class_acc': target_class_acc}
             return tf.estimator.EstimatorSpec(
                 mode, loss=class_loss, eval_metric_ops=metrics)
 
         # Calculate a non streaming (per batch) accuracy
-        source_class_acc = utilities.non_streaming_accuracy(predicted_classes_source,
-                                                            tf.cast(labels['labels'], tf.int32))
-
-        # Initialize learning rate
-        # tf.summary.scalar('class_loss', class_loss)
-        # tf.summary.scalar('source_class_acc', source_class_acc)
+        source_class_acc = utilities.non_streaming_accuracy(pred_classes_source,
+                                                            tf.cast(labels['label_s'], tf.int32))
         tf.identity(class_loss, 'loss')
         tf.identity(source_class_acc, 'source_class_acc')
+        # TensorBoard
+        tf.summary.scalar('Class_loss', class_loss)
+        tf.summary.scalar('Source_class_acc', source_class_acc)
+        tf.summary.merge_all()
         optimizer = tf.train.AdamOptimizer(FLAGS.learning_rate)
         update_ops = tf.get_collection(tf.GraphKeys.UPDATE_OPS)
         with tf.control_dependencies(update_ops):
@@ -71,38 +85,37 @@ def estimator_model_fn(features, labels, mode, params):
         input_layer_source = tf.feature_column.input_layer({"source": features['source']}, params['feature_columns'][0])
         input_layer_target = tf.feature_column.input_layer({"target": features['target']}, params['feature_columns'][1])
         # CNNs need input data to be of shape [batch_size, width, height, channel]
-        input_layer_source = tf.reshape(input_layer_source, [batch_size, 28, 28, params['channel_size']])
-        input_layer_target = tf.reshape(input_layer_target, [batch_size, 32, 32, params['channel_size']])
-        # Resize SVHN source to 28 x 28
-        input_layer_target = tf.image.resize_images(input_layer_target, [28, 28])
+        input_layer_source = tf.reshape(input_layer_source, [-1, params['source_size'], params['source_size'],
+                                                             FLAGS.channel_size])
+        input_layer_target = tf.reshape(input_layer_target, [-1, params['target_size'], params['target_size'],
+                                                             FLAGS.channel_size])
+        # Resize source and target to 28 x 28
+        # input_layer_source = tf.image.resize_images(input_layer_source, [28, 28])
+        # input_layer_target = tf.image.resize_images(input_layer_target, [28, 28])
         # Get source and target encoded vectors.
         out_source = lenet_encoder(input_layer_source, scope='source_encoder', trainable=False)
-        out_target = lenet_encoder(input_layer_target, scope='target_encoder', trainable=True)
-        out_target_ = lenet_encoder(input_layer_target, scope='source_encoder', trainable=False)
+        out_target = lenet_encoder(input_layer_target, scope='target_encoder',
+                                   is_training=(mode == tf.estimator.ModeKeys.TRAIN), trainable=True)
         # Classify target for non-streaming accuracy
         with tf.variable_scope('classifier', reuse=tf.AUTO_REUSE):
             class_logits_target = tf.layers.dense(out_target, 10, trainable=False)
         with tf.variable_scope('classifier', reuse=tf.AUTO_REUSE):
             class_logits_source = tf.layers.dense(out_source, 10, trainable=False)
-        with tf.variable_scope('classifier', reuse=tf.AUTO_REUSE):
-            class_logits_target_ = tf.layers.dense(out_target_, 10, trainable=False)
         # Initialize source encoder with pretrained weights
-        tf.train.init_from_checkpoint(tf.train.latest_checkpoint('./model_m2mm/source_model/'),
+        tf.train.init_from_checkpoint(tf.train.latest_checkpoint(FLAGS.source_model),
                                       {'source_encoder/': 'source_encoder/', 'classifier/': 'classifier/'})
-        if tf.train.latest_checkpoint('./model_m2mm/adversarial_model') is None:
-            tf.train.init_from_checkpoint(tf.train.latest_checkpoint('./model_m2mm/source_model/'),
+        if tf.train.latest_checkpoint(FLAGS.target_model) is None:
+            tf.train.init_from_checkpoint(tf.train.latest_checkpoint(FLAGS.source_model),
                                           {'source_encoder/': 'target_encoder/'})
         # Create non-streaming (per batch) accuracy
         pred_classes_target = tf.argmax(class_logits_target, axis=1, output_type=tf.int32)
         pred_classes_source = tf.argmax(class_logits_source, axis=1, output_type=tf.int32)
-        pred_classes_target_ = tf.argmax(class_logits_target_, axis=1, output_type=tf.int32)
         # Create discriminator labels
         source_adv_label = tf.ones([tf.shape(out_source)[0]], tf.int32)
         target_adv_label = tf.zeros([tf.shape(out_target)[0]], tf.int32)
         # Send encoded vectors through discriminator
         disc_logits_source = discriminator(out_source)
         disc_logits_target = discriminator(out_target)
-        # disc_logits_source = tf.Print(disc_logits_source, [tf.argmax(disc_logits_source, axis=1)], 'Source discriminator: ')
         # Calculate losses
         # The generator uses inverted labels as explained in TODO: LINK!!
         loss_gen = tf.losses.sparse_softmax_cross_entropy(logits=disc_logits_target,
@@ -117,9 +130,6 @@ def estimator_model_fn(features, labels, mode, params):
         tf.identity(loss_adv, 'loss_adv')
         # Evaluate if in EVAL
         if mode == tf.estimator.ModeKeys.EVAL:
-            target_class_acc_ = tf.metrics.accuracy(labels=labels['label_t'],
-                                                    predictions=pred_classes_target_,
-                                                    name='target_class_encoder_acc')
             source_class_acc = tf.metrics.accuracy(labels=labels['label_s'],
                                                    predictions=pred_classes_source,
                                                    name='source_class_acc_op')
@@ -127,25 +137,27 @@ def estimator_model_fn(features, labels, mode, params):
                                                    predictions=pred_classes_target,
                                                    name='target_class_acc_op')
             metrics = {'source_class_acc': source_class_acc,
-                       'target_class_acc': target_class_acc,
-                       'target_class_encoder_acc': target_class_acc_}
+                       'target_class_acc': target_class_acc}
             return tf.estimator.EstimatorSpec(
                 mode, loss=loss_gen + loss_adv, eval_metric_ops=metrics)
         target_class_acc = utilities.non_streaming_accuracy(pred_classes_target,
                                                             tf.cast(labels['label_t'], tf.int32))
         source_class_acc = utilities.non_streaming_accuracy(pred_classes_source,
                                                             tf.cast(labels['label_s'], tf.int32))
-        target_class_acc_enc = utilities.non_streaming_accuracy(pred_classes_target_,
-                                                                tf.cast(labels['label_t'], tf.int32))
         tf.identity(target_class_acc, name='target_class_acc')
         tf.identity(source_class_acc, name='source_class_acc')
-        tf.identity(target_class_acc_enc, name='target_class_acc_enc')
         # Get the trainable variables
         var_target_encoder = tf.trainable_variables('target_encoder')
         var_discriminator = tf.trainable_variables('discriminator')
-        print(var_target_encoder)
-        print(var_discriminator)
-        optimizer = tf.train.AdamOptimizer(FLAGS.learning_rate, 0.5)
+        learning_rate = tf.train.exponential_decay(FLAGS.learning_rate, tf.train.get_global_step(),
+                                                   params['iter_ratio']*10, 0.1, staircase=True)
+        tf.identity(learning_rate, 'learning_rate')
+        # TensorBoard
+        tf.summary.scalar('Train_source_acc', source_class_acc)
+        tf.summary.scalar('Train_target_acc', target_class_acc)
+        tf.summary.scalar('Learning_rate', learning_rate)
+        tf.summary.merge_all()
+        optimizer = tf.train.AdamOptimizer(learning_rate, 0.5)
         train_op_gen = optimizer.minimize(loss_gen,
                                           global_step=tf.train.get_global_step(),
                                           var_list=var_target_encoder)
@@ -166,7 +178,7 @@ def discriminator(inputs):
     return out_disc
 
 
-def lenet_encoder(inputs, scope, trainable=True):
+def lenet_encoder(inputs, scope, is_training=False, trainable=True):
     with tf.variable_scope(scope, reuse=tf.AUTO_REUSE):
         net = tf.layers.conv2d(inputs, 20, kernel_size=5, trainable=trainable,
                                kernel_regularizer=tf.contrib.layers.l2_regularizer(2.5e-5))
@@ -176,6 +188,7 @@ def lenet_encoder(inputs, scope, trainable=True):
                                kernel_regularizer=tf.contrib.layers.l2_regularizer(2.5e-5))
         net = tf.nn.relu(net)
         net = tf.layers.max_pooling2d(net, 2, 2)
+        net = tf.layers.dropout(net, training=is_training)
         net = tf.layers.flatten(net)
         net = tf.layers.dense(net, 120, trainable=trainable,
                               kernel_regularizer=tf.contrib.layers.l2_regularizer(2.5e-5))
@@ -190,109 +203,132 @@ def main(_):
     # TODO: do not pass source label in target mode (it's not needed!)
     """Main function for Adversarial Discriminative Domain Adaptation - ADDA"""
     tf.reset_default_graph()
-    if FLAGS.step == 'source':
-        # Pretrain source classifier on SVHN dataset.
-        (x_train, y_train), (x_test, y_test) = dp.load_mnist(channel_size=FLAGS.channel_size)
-        # Configurations first
-        iter_ratio = math.ceil((x_train.shape[0] / FLAGS.batch_size))
-        print(iter_ratio)
-        # MNIST image shape is 28 x 28
-        feature_columns = [tf.feature_column.numeric_column("source", shape=(28, 28, FLAGS.channel_size))]
+    # Load source and target data set
+    source_size = 32
+    target_size = 32
+    if FLAGS.source == 'mnist':
+        (x_train_s, y_train_s), (x_test_s, y_test_s) = dp.load_mnist(FLAGS.channel_size,
+                                                                     FLAGS.truncate_mnist.lower() == 'true')
+    elif FLAGS.source == 'mnistm':
+        (x_train_s, y_train_s), (x_test_s, y_test_s) = dp.load_mnistm(FLAGS.channel_size)
+    elif FLAGS.source == 'svhn':
+        (x_train_s, y_train_s), (x_test_s, y_test_s) = dp.load_svhn(FLAGS.channel_size,
+                                                                    FLAGS.truncate_svhn.lower() == 'true')
+    else:
+        sys.exit('For the source set you have to choose one of [svhn, mnist, mnistm]!')
 
+    if FLAGS.target == 'mnist':
+        (x_train_t, y_train_t), (x_test_t, y_test_t) = dp.load_mnist(FLAGS.channel_size,
+                                                                     FLAGS.truncate_mnist.lower() == 'true')
+    elif FLAGS.target == 'mnistm':
+        (x_train_t, y_train_t), (x_test_t, y_test_t) = dp.load_mnistm(FLAGS.channel_size)
+    elif FLAGS.target == 'svhn':
+        (x_train_t, y_train_t), (x_test_t, y_test_t) = dp.load_svhn(FLAGS.channel_size,
+                                                                    FLAGS.truncate_svhn.lower() == 'true')
+    else:
+        sys.exit('For the target set you have to choose one of [svhn, mnist, mnistm]!')
+    # Configurations first
+    iter_ratio = math.ceil((x_train_s.shape[0] / FLAGS.batch_size))
+    # Start training from here
+    if FLAGS.step == 'source':
+        feature_columns = [tf.feature_column.numeric_column("source",
+                                                            shape=(source_size, source_size, FLAGS.channel_size)),
+                           tf.feature_column.numeric_column("target",
+                                                            shape=(target_size, target_size, FLAGS.channel_size))]
         # Set up the session config
         session_config = tf.ConfigProto()
         session_config.gpu_options.allow_growth = True
 
         config = tf.estimator.RunConfig(
             save_checkpoints_steps=int(iter_ratio),
-            log_step_count_steps=None,
+            log_step_count_steps=iter_ratio,
             session_config=session_config
         )
 
         # Set up the estimator
         classifier = tf.estimator.Estimator(
             model_fn=estimator_model_fn,
-            model_dir="./model_m2mm/source_model",
+            model_dir=FLAGS.source_model,
             params={
                 'feature_columns': feature_columns,
                 'iter_ratio': iter_ratio,
-                'channel_size': FLAGS.channel_size
+                'channel_size': FLAGS.channel_size,
+                'source_size': source_size,
+                'target_size': target_size
             },
             config=config
         )
         # Define hooks
         logging_hook = tf.train.LoggingTensorHook(
             tensors={"loss": "loss", "source_class_acc": "source_class_acc"},
-            every_n_iter=100)
+            every_n_iter=iter_ratio)
         # Set up train and eval specs
         train_spec = tf.estimator.TrainSpec(
-            input_fn=tf.estimator.inputs.numpy_input_fn({'source': x_train}, {'labels': y_train},
-                                                        shuffle=True, batch_size=128,
+            input_fn=tf.estimator.inputs.numpy_input_fn({'source': x_train_s, 'target': x_train_t},
+                                                        {'label_s': y_train_s, 'label_t': y_train_t},
+                                                        shuffle=True, batch_size=FLAGS.batch_size,
                                                         num_epochs=FLAGS.total_epochs),
+            max_steps=int(iter_ratio * FLAGS.total_epochs),
             hooks=[logging_hook]
         )
         eval_spec = tf.estimator.EvalSpec(
-            input_fn=tf.estimator.inputs.numpy_input_fn({'source': x_test}, {'labels': y_test},
-                                                        shuffle=True, batch_size=128, num_epochs=1),
+            input_fn=tf.estimator.inputs.numpy_input_fn({'source': x_test_s, 'target': x_test_t},
+                                                        {'label_s': y_test_s, 'label_t': y_test_t},
+                                                        shuffle=True, batch_size=FLAGS.batch_size, num_epochs=1),
             steps=None,
-            throttle_secs=300
+            throttle_secs=1
         )
         # Train and evaluate
         tf.estimator.train_and_evaluate(classifier, train_spec, eval_spec)
     if FLAGS.step == 'target':
-        # Load MNIST dataset
-        (x_train_s, y_train_s), (x_test_s, y_test_s) = dp.load_mnist(channel_size=FLAGS.channel_size, truncate=True)
-        # Load MNIST-M dataset
-        (x_train_t, y_train_t), (x_test_t, y_test_t) = dp.load_mnistm()
-        # Configurations first
-        iter_ratio = math.ceil((x_train_s.shape[0] / FLAGS.batch_size))
-        print(iter_ratio)
-        # MNIST shape is 28 x 28 pixels (transformed to three channels)
-        # MNIST-M shape is 32 x 32 pixels with 3 channels
-        feature_columns = [tf.feature_column.numeric_column("source", shape=(28, 28, FLAGS.channel_size)),
-                           tf.feature_column.numeric_column("target", shape=(32, 32, FLAGS.channel_size))]
+        feature_columns = [tf.feature_column.numeric_column("source",
+                                                            shape=(source_size, source_size, FLAGS.channel_size)),
+                           tf.feature_column.numeric_column("target",
+                                                            shape=(target_size, target_size, FLAGS.channel_size))]
 
         # Set up the session config
         session_config = tf.ConfigProto()
         session_config.gpu_options.allow_growth = True
 
         config = tf.estimator.RunConfig(
-            save_checkpoints_steps=1000,
-            log_step_count_steps=None,
+            save_checkpoints_steps=iter_ratio,
+            log_step_count_steps=iter_ratio,
             session_config=session_config
         )
 
         # Set up the estimator
         classifier = tf.estimator.Estimator(
             model_fn=estimator_model_fn,
-            model_dir="./model_m2mm/adversarial_model",
+            model_dir=FLAGS.target_model,
             params={
                 'feature_columns': feature_columns,
                 'iter_ratio': iter_ratio,
-                'channel_size': FLAGS.channel_size
+                'channel_size': FLAGS.channel_size,
+                'source_size': source_size,
+                'target_size': target_size
             },
             config=config
         )
         # Define hooks
         logging_hook = tf.train.LoggingTensorHook(
-            tensors={"loss_gen": "loss_gen", "loss_adv": "loss_adv", "target_class_acc": "target_class_acc",
-                     "source_class_acc": "source_class_acc",
-                     "target_class_acc_enc": "target_class_acc_enc"},
-            every_n_iter=100)
+            tensors={"learning_rate": "learning_rate", "loss_gen": "loss_gen", "loss_adv": "loss_adv",
+                     "target_class_acc": "target_class_acc", "source_class_acc": "source_class_acc"},
+            every_n_iter=iter_ratio-1)
         # Set up train and eval specs
         train_spec = tf.estimator.TrainSpec(
             input_fn=tf.estimator.inputs.numpy_input_fn({'source': x_train_s, 'target': x_train_t},
                                                         {'label_s': y_train_s, 'label_t': y_train_t},
-                                                        shuffle=True, batch_size=128,
+                                                        shuffle=True, batch_size=FLAGS.batch_size,
                                                         num_epochs=FLAGS.total_epochs),
+            max_steps=int(iter_ratio*FLAGS.total_epochs),
             hooks=[logging_hook]
         )
         eval_spec = tf.estimator.EvalSpec(
             input_fn=tf.estimator.inputs.numpy_input_fn({'source': x_test_s, 'target': x_test_t},
                                                         {'label_s': y_test_s, 'label_t': y_test_t},
-                                                        shuffle=True, batch_size=128, num_epochs=1),
+                                                        shuffle=True, batch_size=FLAGS.batch_size, num_epochs=1),
             steps=None,
-            throttle_secs=300
+            throttle_secs=1
         )
         # Train and evaluate
         tf.estimator.train_and_evaluate(classifier, train_spec, eval_spec)
