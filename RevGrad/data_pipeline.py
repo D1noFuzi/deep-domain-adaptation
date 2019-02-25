@@ -21,13 +21,15 @@ def load_mnist(channel_size=3, truncate=False):
     # or grayscale 1 channel)
     x_train = np.reshape(x_train, (-1, 28, 28, 1))
     x_test = np.reshape(x_test, (-1, 28, 28, 1))
+    x_train = np.pad(x_train, ((0, 0), (2, 2), (2, 2), (0, 0)), mode='constant')
+    x_test = np.pad(x_test, ((0, 0), (2, 2), (2, 2), (0, 0)), mode='constant')
     if channel_size == 3:
         x_train = np.concatenate([x_train, x_train, x_train], axis=3)
         x_test = np.concatenate([x_test, x_test, x_test], axis=3)
     return (x_train, y_train), (x_test, y_test)
 
 
-def load_mnistm(channel_size=3, crop=True):
+def load_mnistm(channel_size=3):
     # Load mnistm pkl
     mnistm = pkl.load(open(os.path.join("..", "datasets", "mnist-m", "mnistm_data.pkl"), 'rb'))
     # Get mnistm
@@ -41,14 +43,12 @@ def load_mnistm(channel_size=3, crop=True):
         x_test_m = np.multiply(x_test_m, RGB2GRAY)
         x_test_m = np.sum(x_test_m, axis=3)
         x_train_m = np.reshape(x_train_m, (-1, 32, 32, 1))
-        x_test_m = np.reshape(x_test_m, (-1, 32, 32, 1))
-    if crop:
-        # Crop it to 28x28
-        x_train_m, x_test_m = x_train_m[:, 2:30, 2:30, :], x_test_m[:, 2:30, 2:30, :]
+        x_test_m = np.reshape(x_test_m, (-1, 32, 32, 1)) 
+    print(x_test_m.shape)
     return (x_train_m, y_train_m), (x_test_m, y_test_m)
 
 
-def load_svhn(channel_size=3, truncate=True, crop=True):
+def load_svhn(channel_size=3, truncate=True):
     # load svhn
     svhn = pkl.load(open(os.path.join("..", "datasets", "svhn", "svhn_data.pkl"), 'rb'))
     # Get svhn
@@ -72,7 +72,5 @@ def load_svhn(channel_size=3, truncate=True, crop=True):
         y_train = y_train[inds_train]
         x_test = x_test[inds_test]
         y_test = y_test[inds_test]
-    if crop:
-        x_train, x_test = x_train[:, 2:30, 2:30, :], x_test[:, 2:30, 2:30, :]
     return (x_train, y_train), (x_test, y_test)
 

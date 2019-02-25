@@ -21,7 +21,7 @@ tf.flags.DEFINE_string('model_dir', './model', 'Where to save the model.')
 tf.flags.DEFINE_string('truncate_mnist', 'True', 'Either true or false. Truncates the mnist set to have same length.')
 tf.flags.DEFINE_string('truncate_svhn', 'True', 'Either true or false. Truncates the svhn set to have same length.')
 tf.flags.DEFINE_string('source_only', 'False', 'If set to True, will only train on source classification.')
-
+tf.flags.DEFINE_string('annealing', 'True', 'Use learning rate annealing')
 tf.logging.set_verbosity(tf.logging.DEBUG)
 
 
@@ -30,8 +30,8 @@ def estimator_model_fn(features, labels, mode, params):
     input_layer_source = tf.feature_column.input_layer({"x_s": features['x_s']}, params['feature_columns'][0])
     input_layer_target = tf.feature_column.input_layer({"x_t": features['x_t']}, params['feature_columns'][1])
     # Reshape
-    input_layer_source = tf.reshape(input_layer_source, [-1, 28, 28, FLAGS.channel_size])
-    input_layer_target = tf.reshape(input_layer_target, [-1, 28, 28, FLAGS.channel_size])
+    input_layer_source = tf.reshape(input_layer_source, [-1, 32, 32, FLAGS.channel_size])
+    input_layer_target = tf.reshape(input_layer_target, [-1, 32, 32, FLAGS.channel_size])
 
     y_s = tf.cast(labels['y_s'], tf.int32)
     y_t = tf.cast(labels['y_t'], tf.int32)
@@ -58,7 +58,7 @@ def estimator_model_fn(features, labels, mode, params):
                                                             logits=class_logits_source)
         domain_loss_source = tf.losses.sparse_softmax_cross_entropy(labels=domain_labels_source,
                                                                     logits=domain_logits_source)
-        if FLAGS.source_only.lower() == 'false':
+        if FLAGS.source_only == 'False':
             domain_loss_target = tf.losses.sparse_softmax_cross_entropy(labels=domain_labels_target,
                                                                         logits=domain_logits_target)
             total_loss = tf.reduce_mean(class_loss) + tf.reduce_mean(domain_loss_source) + \
@@ -83,11 +83,14 @@ def estimator_model_fn(features, labels, mode, params):
         target_class_acc = utilities.non_streaming_accuracy(pred_classes_target, y_t)
 
         # Initialize learning rate
-        learning_rate = utilities.lr_annealing(learning_rate=FLAGS.base_learning_rate,
-                                               current_epoch=current_epoch,
-                                               total_epochs=FLAGS.total_epochs,
-                                               alpha=10,
-                                               beta=0.75)
+        if FLAGS.annealing.lower() == 'true':
+            learning_rate = utilities.lr_annealing(learning_rate=FLAGS.base_learning_rate,
+                                                   current_epoch=current_epoch,
+                                                   total_epochs=FLAGS.total_epochs,
+                                                   alpha=10,
+                                                   beta=0.75)
+        else:
+            learning_rate = FLAGS.base_learning_rate
         tf.identity(learning_rate, 'learning_rate')
         tf.identity(alpha, 'alpha')
         tf.identity(total_loss, 'loss')
@@ -163,6 +166,7 @@ def main(_):
                                                                     FLAGS.truncate_svhn.lower() == 'true')
     else:
         sys.exit('For the source set you have to choose one of [svhn, mnist, mnistm]!')
+
     if FLAGS.target == 'mnist':
         (x_train_t, y_train_t), (x_test_t, y_test_t) = dp.load_mnist(FLAGS.channel_size,
                                                                      FLAGS.truncate_mnist.lower() == 'true')
@@ -178,15 +182,15 @@ def main(_):
     iter_ratio = math.ceil((x_train_s.shape[0] / FLAGS.batch_size))
     print(iter_ratio)
     # We are working with transformed MNIST dataset => image shape is 28x28x3
-    feature_columns = [tf.feature_column.numeric_column("x_s", shape=(28, 28, FLAGS.channel_size)),
-                       tf.feature_column.numeric_column("x_t", shape=(28, 28, FLAGS.channel_size))]
+    feature_columns = [tf.feature_column.numeric_column("x_s", shape=(32, 32, FLAGS.channel_size)),
+                       tf.feature_column.numeric_column("x_t", shape=(32, 32, FLAGS.channel_size))]
 
     # Set up the session config
     session_config = tf.ConfigProto()
     session_config.gpu_options.allow_growth = True
 
     config = tf.estimator.RunConfig(
-        save_checkpoints_steps=int(iter_ratio),
+        save_checkpoints_steps=5*int(iter_ratio),
         log_step_count_steps=int(iter_ratio),
         session_config=session_config
     )
